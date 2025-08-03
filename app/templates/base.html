@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Metros and Parking Lots</title>
+    <style>
+        input[type="text"], input[type="number"] {
+            width: 120px; /* Adjust the width as needed */
+        }
+        input[type="number"] {
+            width: 80px; /* Adjust the width for the radius input */
+        }
+    </style>
+</head>
+<body>
+    <h1>Enter a City Name and Radius</h1>
+    <form method="POST" action="/search">
+        <label for="city">City Name:</label>
+        <input type="text" id="city" name="city" placeholder="City name" required>
+        <br><br>
+        <label for="radius">Radius (meters):</label>
+        <input type="number" id="radius" name="radius" placeholder="Radius in meters" value="500" min="100">
+        <br><br>
+        <button type="submit">Search</button>
+    </form>
+</body>
+</html>

@@ -1,0 +1,115 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Search Results</title>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script src="https://cdn.datatables.net/1.13.6/js/jquery.dataTables.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.datatables.net/1.13.6/css/jquery.dataTables.min.css">
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+        }
+        .results {
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+    <h1>Surface Parking Lots Near Metro Stations in {{ city }}</h1>
+    <button id="calculate-all">Calculate Parking Lot Areas</button>
+    <div class="results" id="results"></div>
+    <table id="stations-table" class="display">
+        <thead>
+            <tr>
+                <th>Station Name</th>
+                <th>Total Parking Lot Area (m²)</th>
+                <th>Map</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for station in stations %}
+                <tr data-station="{{ station }}">
+                    <td>{{ station }}</td>
+                    <td class="area-result">Pending...</td>
+                    <td>
+                        <a href="/map?station_name={{ station }}&city={{ city }}" target="_blank">Map</a>
+                    </td>
+                </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    <a href="/">Go back</a>
+
+    <script>
+        $(document).ready(function () {
+            console.log('Document ready.'); // Debugging
+            $.fn.dataTable.ext.type.order['area-sort-pre'] = function (data) {
+            if (data === 'Error' || data === 'Pending...') {
+                return -1; // Treat as lowest
+            }
+            const num = parseFloat(data);
+            return isNaN(num) ? -1 : num;
+            };
+
+            // Initialize DataTables with the custom sorting type
+            const table = $('#stations-table').DataTable({
+                paging: false, // Disable pagination
+                searching: true, // Keep the search functionality
+                ordering: true, // Keep the sorting functionality
+                info: false, // Disable the "Showing X of Y entries" text
+                columnDefs: [
+                    {
+                        targets: 1, // Area column
+                        type: 'area-sort'
+                    }
+                ]
+            });
+
+            $('#calculate-all').click(function () {
+                const city = "{{ city }}";
+                const radius = 500; // Default radius (can be adjusted or passed dynamically)
+                const stations = JSON.parse('{{ stations|tojson|safe }}'); // Rendered as a JSON string and parsed into a JavaScript array
+
+                $('#results').html('<strong>Calculating...</strong>');
+
+                // Send AJAX requests for all stations
+                const requests = stations.map((station, index) => {
+                    return $.post('/get_parking_lots', {
+                        station_name: station,
+                        city: city,
+                        radius: radius
+                    }).then(response => {
+                        const row = $(`#stations-table tbody tr:eq(${index})`);
+                        const cell = row.find('.area-result');
+
+                        // Update cell text
+                        cell.text(response.total_area_m2.toFixed(2));
+
+                        // Invalidate DataTables cache for this cell so sorting uses new data
+                        table.cell(cell).invalidate('dom'); 
+                    })
+                    .catch(() => {
+                        const row = $(`#stations-table tbody tr:eq(${index})`);
+                        const cell = row.find('.area-result');
+
+                        cell.text('Error');
+                        table.cell(cell).invalidate('dom');
+                    });
+                });
+
+                // Wait for all requests to complete
+                Promise.all(requests).then(() => {
+                    $('#results').html('<strong>Calculation complete!</strong>');
+                    console.log($('#stations-table tbody').html());
+                    table.draw(); // Re-draw the table to update sorting
+                    console.log('All requests completed and table updated.');
+                }).catch(() => {
+                    $('#results').html('<strong>Error:</strong> Unable to calculate parking lot areas.');
+                });
+            });
+        });
+    </script>
+</body>
+</html>
