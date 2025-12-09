@@ -65,100 +65,120 @@ def get_metro_station_names(city_name):
 
     return sorted(station_names)
 
-@with_retry_session
-def get_parking_lots_polygons(lat, lon, radius=1000,surface=False, session=None):
+import requests, time
+from shapely.geometry import Polygon
+from shapely.ops import transform
+from pyproj import CRS, Transformer
+
+
+OVERPASS_URLS = [
+    "https://lz4.overpass-api.de/api/interpreter",        # fastest / best success rate
+    "https://overpass.kumi.systems/api/interpreter",
+    "https://overpass.openstreetmap.fr/api/interpreter",
+]
+
+
+def overpass_query(query, session: requests.Session):
+    """Try multiple Overpass servers sequentially until one succeeds."""
+    for url in OVERPASS_URLS:
+        try:
+            resp = session.post(url, data={"data": query}, timeout=90)
+            if resp.status_code == 429:    # rate limited
+                time.sleep(3)
+                continue
+            resp.raise_for_status()
+            return resp.json()
+        except Exception:
+            continue
+    raise Exception("All Overpass servers failed or timed out")
+
+def get_parking_lots_polygons(lat, lon, radius=1000, surface=False, session=None):
     """
-    Fetch surface parking lot polygons from Overpass and calculate their area.
-
-    Args:
-        lat (float): Latitude of center point.
-        lon (float): Longitude of center point.
-        radius (int): Search radius in meters.
-        surface (bool): Whether to include only surface lots.
-
-    Returns:
-        list of dict: Each with polygon coords, area (m²), and tags.
+    Fetch parking lots near (lat,lon), sequentially expand geometry, compute areas.
+    This version is designed to eliminate 429/504 errors.
     """
-    if surface is True:
 
-      query = f"""
-      [out:json][timeout:25];
-      (
-        way["amenity"="parking"]["parking"="surface"](around:{radius},{lat},{lon});
-        relation["amenity"="parking"]["parking"="surface"](around:{radius},{lat},{lon});
-      );
-      out tags geom;
-      """
+    if session is None:
+        session = requests.Session()
+
+    # --- Phase A: Fast lightweight lookup (center only) ---
+    if surface:
+        selector = f'way["amenity"="parking"]["parking"="surface"](around:{radius},{lat},{lon});'
     else:
-      query = f"""
-      [out:json][timeout:25];
-      (
-        node["amenity"="parking"](around:{radius},{lat},{lon});
-        way["amenity"="parking"]["parking"!="multi-storey"]["parking"!="lane"]["parking"!="street_side"]["parking"!="underground"]["covered"!="yes"](around:{radius},{lat},{lon});
-        relation["amenity"="parking"]["parking"!="multi-storey"]["parking"!="lane"]["parking"!="street_side"]["parking"!="underground"](around:{radius},{lat},{lon});
-      );
-      out tags geom;
-      """
+        selector = (
+            'way["amenity"="parking"]["parking"!="multi-storey"]["parking"!="lane"]'
+            '["parking"!="street_side"]["parking"!="underground"]["covered"!="yes"]'
+            f'(around:{radius},{lat},{lon});'
+        )
 
-    url = "http://overpass-api.de/api/interpreter"
-    response = session.post(url, data={'data': query})
+    lookup_query = f"""
+    [out:json][timeout:90];
+    (
+      {selector}
+    );
+    out ids center tags;
+    """
 
-    
-    if response.status_code != 200:
-        raise Exception(f"Overpass API error: {response.status_code}")
+    lookup = overpass_query(lookup_query, session)
 
-    data = response.json()
     results = []
 
-    for element in data.get('elements', []):
-        if 'geometry' in element:
-            raw_coords = [(pt['lon'], pt['lat']) for pt in element['geometry']]
+    # --- Phase B: Fetch geometry for each result (sequential, low load) ---
+    for el in lookup.get("elements", []):
+        way_id = el["id"]
 
-            # Remove consecutive duplicates
+        geom_query = f"""
+        [out:json][timeout:60];
+        way({way_id});
+        out geom tags;
+        """
+
+        try:
+            geom_data = overpass_query(geom_query, session)
+        except Exception:
+            continue
+
+        for element in geom_data.get("elements", []):
+            if "geometry" not in element:
+                continue
+
+            raw_coords = [(pt["lon"], pt["lat"]) for pt in element["geometry"]]
+
+            # --- cleanup coords ---
             coords = [raw_coords[0]]
             for pt in raw_coords[1:]:
                 if pt != coords[-1]:
                     coords.append(pt)
-
-            # Remove closing point if duplicated
             if len(coords) > 2 and coords[0] == coords[-1]:
                 coords.pop()
-
             if len(coords) < 3:
-                continue  # not a polygon
+                continue
 
             poly = Polygon(coords)
-
             if not poly.is_valid:
-                print("invalid poly")
-                continue  # skip invalid polygons (e.g., self-intersections)
+                continue
 
-            # Use local UTM projection for accurate area
-            centroid_lon = poly.centroid.x
-            centroid_lat = poly.centroid.y
+            # --- Compute area using UTM ---
             try:
-              zone_number = int((centroid_lon + 180) / 6) + 1
-              is_southern = centroid_lat < 0
-              epsg_code = 32700 + zone_number if is_southern else 32600 + zone_number
-              utm_crs = CRS.from_epsg(epsg_code)
-
-              project = Transformer.from_crs("EPSG:4326", utm_crs, always_xy=True).transform
-              poly_m = transform(project, poly)
-              area = poly_m.area
-            except Exception as e:
-                print(f"[ERROR] Failed to compute area for element {element.get('id')}: {e}")
+                lon_c, lat_c = poly.centroid.x, poly.centroid.y
+                zone = int((lon_c + 180) / 6) + 1
+                epsg = (32600 + zone) if lat_c >= 0 else (32700 + zone)
+                proj = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True).transform
+                area = transform(proj, poly).area
+            except:
                 continue
 
             results.append({
-                'id': element['id'],
-                'type': element['type'],
-                'coordinates': coords,
-                'area_m2': round(area, 2),
-                'tags': element.get('tags', {}),
-                'polygon': poly
+                "id": element["id"],
+                "type": element["type"],
+                "coordinates": coords,
+                "area_m2": round(area, 2),
+                "tags": element.get("tags", {}),
+                "polygon": poly
             })
 
     return results
+
 
 def visualize_multiple_polygons(polygons, numbers=None, zoom_start=15):
     """
