@@ -344,14 +344,12 @@ def api_stations():
 
 @main.route('/api/all_parking', methods=['POST'])
 def api_all_parking():
-    body     = request.get_json(force=True)
-    city     = body.get('city', '').strip()
-    radius   = body.get('radius', 500)
-    stations = body.get('stations', [])
-    area_id  = body.get('area_id')
+    body    = request.get_json(force=True)
+    city    = body.get('city', '').strip()
+    area_id = body.get('area_id')
 
-    if not city or not stations:
-        return jsonify({'error': 'city and stations required'}), 400
+    if not city:
+        return jsonify({'error': 'city required'}), 400
 
     session = requests.Session()
     retry = Retry(total=2, backoff_factor=0.5, status_forcelist=[],
@@ -361,41 +359,24 @@ def api_all_parking():
     session.mount("https://", adapter)
 
     try:
-        raw = get_city_parking_lots(city, session, area_id=area_id)
+        raw  = get_city_parking_lots(city, session, area_id=area_id)
         lots = _parse_parking_elements(raw.get("elements", []))
 
-        # Assign each lot to every station within radius
-        station_areas = {s["name"]: 0.0 for s in stations}
-        features = []
-        seen_lot_ids = set()
+        # Radius assignment is now done client-side; return all lots with centroids.
+        features = [{
+            "type": "Feature",
+            "geometry": {
+                "type": "Polygon",
+                "coordinates": [[[c[0], c[1]] for c in lot["coordinates"]]]
+            },
+            "properties": {
+                "area_m2":  lot["area_m2"],
+                "clat":     lot["centroid_lat"],
+                "clon":     lot["centroid_lon"],
+            }
+        } for lot in lots]
 
-        for lot in lots:
-            assigned = []
-            for s in stations:
-                if _haversine_m(lot["centroid_lat"], lot["centroid_lon"],
-                                s["lat"], s["lon"]) <= radius:
-                    assigned.append(s["name"])
-                    station_areas[s["name"]] += lot["area_m2"]
-
-            if assigned and lot["id"] not in seen_lot_ids:
-                seen_lot_ids.add(lot["id"])
-                features.append({
-                    "type": "Feature",
-                    "geometry": {
-                        "type": "Polygon",
-                        "coordinates": [[[c[0], c[1]] for c in lot["coordinates"]]]
-                    },
-                    "properties": {
-                        "area_m2": lot["area_m2"],
-                        "stations": assigned
-                    }
-                })
-
-        return jsonify({
-            "type": "FeatureCollection",
-            "features": features,
-            "stations": {name: round(area, 2) for name, area in station_areas.items()}
-        })
+        return jsonify({"type": "FeatureCollection", "features": features})
 
     except Exception as e:
         return jsonify({'error': str(e)}), 500

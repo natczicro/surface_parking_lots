@@ -111,6 +111,69 @@
             margin-top: 3px;
         }
 
+        /* Radius bar */
+        #radius-bar {
+            padding: 10px 14px 8px;
+            border-bottom: 1px solid #f3f4f6;
+            flex-shrink: 0;
+            min-width: 300px;
+        }
+
+        .radius-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 6px;
+        }
+
+        #radius-val {
+            font-size: 0.8rem;
+            font-weight: 600;
+            color: #0d9488;
+        }
+
+        #radius-slider {
+            -webkit-appearance: none;
+            width: 100%;
+            height: 4px;
+            border-radius: 2px;
+            background: #e5e7eb;
+            outline: none;
+            cursor: pointer;
+        }
+
+        #radius-slider::-webkit-slider-thumb {
+            -webkit-appearance: none;
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #0d9488;
+            cursor: pointer;
+            border: 2px solid #fff;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+        }
+
+        #radius-slider::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            border-radius: 50%;
+            background: #0d9488;
+            cursor: pointer;
+            border: 2px solid #fff;
+            box-shadow: 0 1px 4px rgba(0,0,0,0.15);
+        }
+
+        .radius-ticks {
+            display: flex;
+            justify-content: space-between;
+            margin-top: 4px;
+        }
+
+        .radius-tick {
+            font-size: 0.65rem;
+            color: #d1d5db;
+        }
+
         /* Sort bar */
         #sort-bar {
             display: flex;
@@ -358,6 +421,19 @@
                 </div>
             </div>
 
+            <div id="radius-bar">
+                <div class="radius-header">
+                    <span class="sort-label">Radius</span>
+                    <span id="radius-val">{{ radius }} m</span>
+                </div>
+                <input type="range" id="radius-slider" min="250" max="2000" step="50" value="{{ radius }}">
+                <div class="radius-ticks">
+                    <span class="radius-tick">250 m</span>
+                    <span class="radius-tick">1 km</span>
+                    <span class="radius-tick">2 km</span>
+                </div>
+            </div>
+
             <div id="sort-bar">
                 <span class="sort-label">Sort</span>
                 <button class="sort-btn active" id="sort-alpha">A – Z</button>
@@ -401,8 +477,77 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-const CITY   = {{ city|tojson }};
-const RADIUS = {{ radius }};
+const CITY = {{ city|tojson }};
+let currentRadius = {{ radius }};
+
+function haversineM(lat1, lon1, lat2, lon2) {
+    const R = 6_371_000;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat/2)**2
+            + Math.cos(lat1 * Math.PI/180) * Math.cos(lat2 * Math.PI/180) * Math.sin(dLon/2)**2;
+    return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+function computeAssignments(radius) {
+    const totals = {};
+    stationItems.forEach(s => totals[s.name] = 0);
+    parkingLayers.forEach(({ clat, clon, area_m2 }) => {
+        stationItems.forEach(s => {
+            if (haversineM(clat, clon, s.lat, s.lon) <= radius)
+                totals[s.name] += area_m2;
+        });
+    });
+    return totals;
+}
+
+function updateSidebarAreas(assignments) {
+    let grand = 0;
+    stationItems.forEach(entry => {
+        const area = assignments[entry.name] ?? 0;
+        entry.area_m2 = area;
+        grand += area;
+        if (area > 0) {
+            entry.areaEl.textContent = formatArea(area);
+            entry.areaEl.className   = 'station-area has-lots';
+            entry.dotEl.className    = 'station-dot has-lots';
+        } else {
+            entry.areaEl.textContent = 'No lots found';
+            entry.areaEl.className   = 'station-area no-lots';
+            entry.dotEl.className    = 'station-dot no-lots';
+        }
+    });
+    totalArea = grand;
+    document.getElementById('s-area').textContent = grand > 0 ? formatArea(grand) : '—';
+    if (currentSort === 'area') applySortOrder();
+}
+
+// Radius slider
+const radiusSlider = document.getElementById('radius-slider');
+const radiusValEl  = document.getElementById('radius-val');
+
+radiusSlider.addEventListener('input', () => {
+    currentRadius = parseInt(radiusSlider.value);
+    radiusValEl.textContent = currentRadius >= 1000
+        ? `${(currentRadius / 1000).toFixed(currentRadius % 1000 === 0 ? 0 : 1)} km`
+        : `${currentRadius} m`;
+
+    if (parkingLayers.length === 0) return;
+
+    updateSidebarAreas(computeAssignments(currentRadius));
+
+    // Re-apply highlight for active station at new radius
+    if (activeStation) {
+        const s = stationItems.find(e => e.name === activeStation);
+        if (s) {
+            parkingLayers.forEach(({ layer, clat, clon }) => {
+                const within = haversineM(clat, clon, s.lat, s.lon) <= currentRadius;
+                layer.setStyle(within ? STYLE_ACTIVE : STYLE_DEFAULT);
+                if (within) layer.bringToFront();
+            });
+        }
+    }
+});
 
 // ── Map setup ──────────────────────────────────────────────────
 const map = L.map('map', { zoomControl: true });
@@ -477,14 +622,16 @@ function highlightStation(name) {
     if (activeStation === name) {
         activeStation = null;
         parkingLayers.forEach(({ layer }) => layer.setStyle(STYLE_DEFAULT));
-        return false; // deselected
+        return false;
     }
     activeStation = name;
-    parkingLayers.forEach(({ layer, stations }) => {
-        layer.setStyle(stations.includes(name) ? STYLE_ACTIVE : STYLE_DEFAULT);
-        if (stations.includes(name)) layer.bringToFront();
+    const s = stationItems.find(e => e.name === name);
+    parkingLayers.forEach(({ layer, clat, clon }) => {
+        const within = s && haversineM(clat, clon, s.lat, s.lon) <= currentRadius;
+        layer.setStyle(within ? STYLE_ACTIVE : STYLE_DEFAULT);
+        if (within) layer.bringToFront();
     });
-    return true; // selected
+    return true;
 }
 
 // ── Station list ───────────────────────────────────────────────
@@ -623,11 +770,11 @@ async function init() {
     setToast('Loading all parking lots…');
     setProgress(0, 1);
 
-    // 3. Single city-wide query — station coords passed in so backend skips re-fetching them
+    // 3. Single city-wide query — radius assignment handled client-side
     const parkingData = await fetch('/api/all_parking', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ city: CITY, radius: RADIUS, stations, area_id: areaId })
+        body: JSON.stringify({ city: CITY, area_id: areaId })
     }).then(r => r.json()).catch(() => null);
 
     if (!parkingData || parkingData.error) {
@@ -640,40 +787,29 @@ async function init() {
         return;
     }
 
-    // Add all polygons to the map at once
+    // Add all polygons to the map; store centroid alongside each layer
     if (parkingData.features && parkingData.features.length > 0) {
         L.geoJSON(parkingData, {
             style: STYLE_DEFAULT,
             onEachFeature(feature, layer) {
                 const area = Math.round(feature.properties.area_m2).toLocaleString();
                 layer.bindPopup(`<strong>${area} m²</strong>`, { closeButton: false });
-                parkingLayers.push({ layer, stations: feature.properties.stations || [] });
+                parkingLayers.push({
+                    layer,
+                    clat:    feature.properties.clat,
+                    clon:    feature.properties.clon,
+                    area_m2: feature.properties.area_m2,
+                });
             }
         }).addTo(map);
     }
 
-    // Populate sidebar areas
-    const stationAreas = parkingData.stations || {};
-    stationItems.forEach(entry => {
-        const area = stationAreas[entry.name] ?? 0;
-        entry.area_m2 = area;
-        loadedCount++;
-        if (area > 0) {
-            entry.areaEl.textContent = formatArea(area);
-            entry.areaEl.className   = 'station-area has-lots';
-            entry.dotEl.className    = 'station-dot has-lots';
-            totalArea += area;
-        } else {
-            entry.areaEl.textContent = 'No lots found';
-            entry.areaEl.className   = 'station-area no-lots';
-            entry.dotEl.className    = 'station-dot no-lots';
-        }
-    });
-
-    updateSummary();
+    // Compute station areas client-side at the current radius
+    loadedCount = stationItems.length;
+    document.getElementById('s-loaded').textContent = loadedCount;
+    updateSidebarAreas(computeAssignments(currentRadius));
     setProgress(1, 1);
     setToast(null);
-    if (currentSort === 'area') applySortOrder();
 }
 
 // ── Helpers ────────────────────────────────────────────────────
