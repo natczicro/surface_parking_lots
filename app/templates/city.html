@@ -375,6 +375,35 @@
             text-align: left;
         }
         #error-banner.hidden { display: none; }
+
+        #error-banner {
+            flex-direction: column;
+            align-items: flex-start;
+        }
+
+        .error-row {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        #retry-btn {
+            display: none;
+            margin-top: 8px;
+            background: #b91c1c;
+            color: #fff;
+            border: none;
+            border-radius: 6px;
+            padding: 5px 14px;
+            font-size: 0.78rem;
+            font-weight: 600;
+            font-family: 'Inter', sans-serif;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        #retry-btn:hover { background: #991b1b; }
+        #retry-btn.visible { display: inline-block; }
         #progress-bar {
             height: 100%;
             background: linear-gradient(90deg, #0d9488, #10b981);
@@ -412,12 +441,12 @@
                     <div class="summary-label">Stations</div>
                 </div>
                 <div class="summary-cell">
-                    <div class="summary-val" id="s-loaded">0</div>
-                    <div class="summary-label">Loaded</div>
-                </div>
-                <div class="summary-cell">
                     <div class="summary-val" id="s-area">—</div>
                     <div class="summary-label">Total area</div>
+                </div>
+                <div class="summary-cell">
+                    <div class="summary-val" id="s-avg">—</div>
+                    <div class="summary-label">Avg / station</div>
                 </div>
             </div>
 
@@ -457,12 +486,15 @@
         </div>
 
         <div id="error-banner" class="hidden">
-            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" flex-shrink="0">
-                <circle cx="7.5" cy="7.5" r="6.5" stroke="#b91c1c" stroke-width="1.4"/>
-                <path d="M7.5 4.5v3.5" stroke="#b91c1c" stroke-width="1.5" stroke-linecap="round"/>
-                <circle cx="7.5" cy="10.5" r="0.75" fill="#b91c1c"/>
-            </svg>
-            <span id="error-text"></span>
+            <div class="error-row">
+                <svg width="15" height="15" viewBox="0 0 15 15" fill="none" style="flex-shrink:0">
+                    <circle cx="7.5" cy="7.5" r="6.5" stroke="#b91c1c" stroke-width="1.4"/>
+                    <path d="M7.5 4.5v3.5" stroke="#b91c1c" stroke-width="1.5" stroke-linecap="round"/>
+                    <circle cx="7.5" cy="10.5" r="0.75" fill="#b91c1c"/>
+                </svg>
+                <span id="error-text"></span>
+            </div>
+            <button id="retry-btn">↺ Retry</button>
         </div>
 
         <div id="progress-toast">
@@ -502,12 +534,13 @@ function computeAssignments(radius) {
 }
 
 function updateSidebarAreas(assignments) {
-    let grand = 0;
+    let grand = 0, withLots = 0;
     stationItems.forEach(entry => {
         const area = assignments[entry.name] ?? 0;
         entry.area_m2 = area;
         grand += area;
         if (area > 0) {
+            withLots++;
             entry.areaEl.textContent = formatArea(area);
             entry.areaEl.className   = 'station-area has-lots';
             entry.dotEl.className    = 'station-dot has-lots';
@@ -519,6 +552,7 @@ function updateSidebarAreas(assignments) {
     });
     totalArea = grand;
     document.getElementById('s-area').textContent = grand > 0 ? formatArea(grand) : '—';
+    document.getElementById('s-avg').textContent  = withLots > 0 ? formatArea(grand / withLots) : '—';
     if (currentSort === 'area') applySortOrder();
 }
 
@@ -580,11 +614,18 @@ const progressWrap = document.getElementById('progress-bar-wrap');
 
 const errorBanner = document.getElementById('error-banner');
 const errorText   = document.getElementById('error-text');
+const retryBtn    = document.getElementById('retry-btn');
 
-function showError(msg) {
+function showError(msg, retryable = false) {
     setToast(null);
     errorText.textContent = msg;
     errorBanner.classList.remove('hidden');
+    retryBtn.classList.toggle('visible', retryable);
+}
+
+function hideError() {
+    errorBanner.classList.add('hidden');
+    retryBtn.classList.remove('visible');
 }
 
 function setToast(text) {
@@ -767,10 +808,22 @@ async function init() {
     }
 
     renderStations(stations);
+    await loadParking(areaId);
+}
+
+// Stored so the retry button can call loadParking without re-running init
+let _areaId = null;
+
+async function loadParking(areaId) {
+    _areaId = areaId;
+    hideError();
     setToast('Loading all parking lots…');
     setProgress(0, 1);
 
-    // 3. Single city-wide query — radius assignment handled client-side
+    // Clear any previously loaded layers on retry
+    parkingLayers.forEach(({ layer }) => map.removeLayer(layer));
+    parkingLayers.length = 0;
+
     const parkingData = await fetch('/api/all_parking', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
@@ -783,11 +836,10 @@ async function init() {
             entry.areaEl.className   = 'station-area no-lots';
             entry.dotEl.className    = 'station-dot error';
         });
-        showError('Could not load parking lot data. OpenStreetMap servers may be temporarily down — please try again shortly.');
+        showError('Could not load parking lot data. OpenStreetMap servers may be temporarily down — please try again shortly.', true);
         return;
     }
 
-    // Add all polygons to the map; store centroid alongside each layer
     if (parkingData.features && parkingData.features.length > 0) {
         L.geoJSON(parkingData, {
             style: STYLE_DEFAULT,
@@ -804,13 +856,12 @@ async function init() {
         }).addTo(map);
     }
 
-    // Compute station areas client-side at the current radius
-    loadedCount = stationItems.length;
-    document.getElementById('s-loaded').textContent = loadedCount;
     updateSidebarAreas(computeAssignments(currentRadius));
     setProgress(1, 1);
     setToast(null);
 }
+
+retryBtn.addEventListener('click', () => loadParking(_areaId));
 
 // ── Helpers ────────────────────────────────────────────────────
 function formatArea(m2) {
