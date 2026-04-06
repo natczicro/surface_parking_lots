@@ -1,0 +1,520 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{{ city }} — ParkingScope</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    <style>
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { height: 100%; font-family: 'Inter', sans-serif; overflow: hidden; }
+
+        #layout {
+            display: flex;
+            height: 100vh;
+        }
+
+        /* ── Sidebar ── */
+        #sidebar {
+            width: 300px;
+            flex-shrink: 0;
+            display: flex;
+            flex-direction: column;
+            background: #fff;
+            border-right: 1px solid #e5e7eb;
+            box-shadow: 2px 0 16px rgba(0,0,0,0.07);
+            transition: width 0.28s cubic-bezier(0.4, 0, 0.2, 1);
+            overflow: hidden;
+            z-index: 10;
+        }
+
+        #sidebar.collapsed { width: 0; }
+
+        /* Inner wrapper keeps content at fixed width so it doesn't reflow during transition */
+        #sidebar-inner { width: 300px; display: flex; flex-direction: column; height: 100%; }
+
+        #sidebar-header {
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            padding: 14px 14px 12px;
+            border-bottom: 1px solid #f3f4f6;
+            flex-shrink: 0;
+        }
+
+        .back-link {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            color: #9ca3af;
+            text-decoration: none;
+            font-size: 0.75rem;
+            font-weight: 500;
+            margin-bottom: 4px;
+            transition: color 0.15s;
+        }
+        .back-link:hover { color: #374151; }
+
+        .city-title {
+            font-size: 1.1rem;
+            font-weight: 700;
+            color: #111827;
+            line-height: 1.2;
+        }
+
+        #collapse-btn {
+            background: none;
+            border: 1px solid #e5e7eb;
+            border-radius: 7px;
+            width: 28px;
+            height: 28px;
+            flex-shrink: 0;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: #9ca3af;
+            margin-top: 2px;
+            transition: background 0.15s, color 0.15s;
+        }
+        #collapse-btn:hover { background: #f9fafb; color: #374151; }
+
+        /* Summary strip */
+        #summary-strip {
+            display: flex;
+            border-bottom: 1px solid #f3f4f6;
+            flex-shrink: 0;
+        }
+
+        .summary-cell {
+            flex: 1;
+            padding: 10px 8px;
+            text-align: center;
+            border-right: 1px solid #f3f4f6;
+        }
+        .summary-cell:last-child { border-right: none; }
+
+        .summary-val {
+            font-size: 0.88rem;
+            font-weight: 700;
+            color: #111827;
+            line-height: 1;
+        }
+
+        .summary-label {
+            font-size: 0.68rem;
+            color: #9ca3af;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-top: 3px;
+        }
+
+        /* Station list */
+        #station-list {
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        #station-list::-webkit-scrollbar { width: 4px; }
+        #station-list::-webkit-scrollbar-track { background: transparent; }
+        #station-list::-webkit-scrollbar-thumb { background: #e5e7eb; border-radius: 4px; }
+
+        .station-item {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 14px;
+            border-bottom: 1px solid #f9fafb;
+            cursor: pointer;
+            transition: background 0.1s;
+            user-select: none;
+        }
+        .station-item:hover { background: #f9fafb; }
+        .station-item.active { background: #f0fdfa; }
+
+        .station-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            flex-shrink: 0;
+            background: #e5e7eb;
+            transition: background 0.3s;
+        }
+        .station-dot.loading {
+            background: #f59e0b;
+            animation: blink 1s ease-in-out infinite;
+        }
+        .station-dot.has-lots  { background: #0d9488; }
+        .station-dot.no-lots   { background: #d1d5db; }
+        .station-dot.error     { background: #f87171; }
+
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.25} }
+
+        .station-info { flex: 1; min-width: 0; }
+
+        .station-name {
+            font-size: 0.85rem;
+            font-weight: 500;
+            color: #111827;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .station-area {
+            font-size: 0.73rem;
+            color: #9ca3af;
+            margin-top: 1px;
+        }
+        .station-area.has-lots { color: #0d9488; font-weight: 500; }
+        .station-area.no-lots  { color: #9ca3af; font-style: italic; }
+
+        /* ── Map ── */
+        #map-container {
+            flex: 1;
+            position: relative;
+            min-width: 0;
+        }
+
+        #map { width: 100%; height: 100%; }
+
+        /* Expand button (only when sidebar is collapsed) */
+        #expand-btn {
+            position: absolute;
+            left: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            z-index: 800;
+            background: #fff;
+            border: 1px solid #e5e7eb;
+            border-radius: 8px;
+            width: 28px;
+            height: 52px;
+            cursor: pointer;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            color: #6b7280;
+            box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+            transition: background 0.15s;
+        }
+        #expand-btn.visible { display: flex; }
+        #expand-btn:hover { background: #f9fafb; }
+
+        /* Progress toast */
+        #progress-toast {
+            position: absolute;
+            bottom: 24px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 800;
+            background: rgba(255,255,255,0.95);
+            backdrop-filter: blur(8px);
+            border: 1px solid #e5e7eb;
+            border-radius: 10px;
+            padding: 9px 16px;
+            font-size: 0.8rem;
+            color: #374151;
+            display: flex;
+            align-items: center;
+            gap: 9px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.1);
+            transition: opacity 0.3s;
+            white-space: nowrap;
+        }
+        #progress-toast.hidden { opacity: 0; pointer-events: none; }
+
+        .spinner {
+            width: 13px;
+            height: 13px;
+            border: 2px solid #e5e7eb;
+            border-top-color: #0d9488;
+            border-radius: 50%;
+            animation: spin 0.65s linear infinite;
+            flex-shrink: 0;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        /* Progress bar under toast */
+        #progress-bar-wrap {
+            position: absolute;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: #f3f4f6;
+            z-index: 800;
+            transition: opacity 0.3s;
+        }
+        #progress-bar-wrap.hidden { opacity: 0; }
+        #progress-bar {
+            height: 100%;
+            background: linear-gradient(90deg, #0d9488, #10b981);
+            width: 0%;
+            transition: width 0.4s ease;
+        }
+    </style>
+</head>
+<body>
+<div id="layout">
+
+    <!-- Sidebar -->
+    <div id="sidebar">
+        <div id="sidebar-inner">
+            <div id="sidebar-header">
+                <div>
+                    <a href="/" class="back-link">
+                        <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                            <path d="M6.5 2L3.5 5l3 3" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/>
+                        </svg>
+                        Back
+                    </a>
+                    <div class="city-title">{{ city }}</div>
+                </div>
+                <button id="collapse-btn" title="Collapse">
+                    <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                        <path d="M8 2L4 6l4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+                    </svg>
+                </button>
+            </div>
+
+            <div id="summary-strip">
+                <div class="summary-cell">
+                    <div class="summary-val" id="s-stations">—</div>
+                    <div class="summary-label">Stations</div>
+                </div>
+                <div class="summary-cell">
+                    <div class="summary-val" id="s-loaded">0</div>
+                    <div class="summary-label">Loaded</div>
+                </div>
+                <div class="summary-cell">
+                    <div class="summary-val" id="s-area">—</div>
+                    <div class="summary-label">Total area</div>
+                </div>
+            </div>
+
+            <div id="station-list"></div>
+        </div>
+    </div>
+
+    <!-- Map -->
+    <div id="map-container">
+        <button id="expand-btn" title="Show panel">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none">
+                <path d="M4 2l4 4-4 4" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
+        </button>
+
+        <div id="progress-bar-wrap">
+            <div id="progress-bar"></div>
+        </div>
+
+        <div id="progress-toast">
+            <div class="spinner"></div>
+            <span id="toast-text">Locating city…</span>
+        </div>
+
+        <div id="map"></div>
+    </div>
+
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const CITY   = {{ city|tojson }};
+const RADIUS = {{ radius }};
+
+// ── Map setup ──────────────────────────────────────────────────
+const map = L.map('map', { zoomControl: true });
+L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a>',
+    maxZoom: 19
+}).addTo(map);
+
+// ── Sidebar toggle ─────────────────────────────────────────────
+const sidebar    = document.getElementById('sidebar');
+const expandBtn  = document.getElementById('expand-btn');
+const collapseBtn = document.getElementById('collapse-btn');
+
+collapseBtn.addEventListener('click', () => {
+    sidebar.classList.add('collapsed');
+    expandBtn.classList.add('visible');
+    setTimeout(() => map.invalidateSize(), 300);
+});
+expandBtn.addEventListener('click', () => {
+    sidebar.classList.remove('collapsed');
+    expandBtn.classList.remove('visible');
+    setTimeout(() => map.invalidateSize(), 300);
+});
+
+// ── Toast / progress bar ───────────────────────────────────────
+const toast      = document.getElementById('progress-toast');
+const toastText  = document.getElementById('toast-text');
+const progressBar = document.getElementById('progress-bar');
+const progressWrap = document.getElementById('progress-bar-wrap');
+
+function setToast(text) {
+    if (text) {
+        toastText.textContent = text;
+        toast.classList.remove('hidden');
+    } else {
+        toast.classList.add('hidden');
+        progressWrap.classList.add('hidden');
+    }
+}
+
+function setProgress(done, total) {
+    progressBar.style.width = total > 0 ? `${(done / total) * 100}%` : '0%';
+}
+
+// ── Summary cells ──────────────────────────────────────────────
+let totalArea    = 0;
+let loadedCount  = 0;
+let totalStations = 0;
+
+function updateSummary() {
+    document.getElementById('s-loaded').textContent = loadedCount;
+    document.getElementById('s-area').textContent   = totalArea > 0 ? formatArea(totalArea) : '—';
+}
+
+// ── Station list ───────────────────────────────────────────────
+// Each entry: { name, lat, lon, dotEl, areaEl, itemEl }
+const stationItems = [];
+
+function renderStations(stations) {
+    totalStations = stations.length;
+    document.getElementById('s-stations').textContent = stations.length;
+
+    const list = document.getElementById('station-list');
+    list.innerHTML = '';
+
+    stations.forEach((s, i) => {
+        const item = document.createElement('div');
+        item.className = 'station-item';
+        item.innerHTML = `
+            <div class="station-dot" id="dot-${i}"></div>
+            <div class="station-info">
+                <div class="station-name">${s.name}</div>
+                <div class="station-area" id="area-${i}">Pending…</div>
+            </div>`;
+
+        item.addEventListener('click', () => {
+            document.querySelectorAll('.station-item').forEach(el => el.classList.remove('active'));
+            item.classList.add('active');
+            map.flyTo([s.lat, s.lon], 15, { duration: 1.0 });
+        });
+
+        list.appendChild(item);
+
+        // Small ring marker for the station
+        L.circleMarker([s.lat, s.lon], {
+            radius: 5,
+            color: '#0d9488',
+            fillColor: '#ffffff',
+            fillOpacity: 1,
+            weight: 2.5
+        }).addTo(map).bindTooltip(s.name, { direction: 'top', offset: [0, -4] });
+
+        stationItems.push({
+            ...s,
+            dotEl:  document.getElementById(`dot-${i}`),
+            areaEl: document.getElementById(`area-${i}`),
+            itemEl: item
+        });
+    });
+}
+
+// ── Load parking lots (sequential queue) ──────────────────────
+async function loadParkingForStation(entry) {
+    entry.dotEl.className  = 'station-dot loading';
+    entry.areaEl.textContent = 'Loading…';
+    entry.areaEl.className   = 'station-area';
+
+    try {
+        const url = `/api/parking_geojson?lat=${entry.lat}&lon=${entry.lon}&radius=${RADIUS}`;
+        const data = await fetch(url).then(r => r.json());
+
+        if (data.features && data.features.length > 0) {
+            L.geoJSON(data, {
+                style: {
+                    color: '#0d9488',
+                    fillColor: '#0d9488',
+                    fillOpacity: 0.22,
+                    weight: 1.5
+                },
+                onEachFeature(feature, layer) {
+                    const area = Math.round(feature.properties.area_m2).toLocaleString();
+                    layer.bindPopup(`<strong>${area} m²</strong>`, { closeButton: false });
+                }
+            }).addTo(map);
+
+            totalArea += data.total_area_m2;
+            entry.areaEl.textContent = formatArea(data.total_area_m2);
+            entry.areaEl.className   = 'station-area has-lots';
+            entry.dotEl.className    = 'station-dot has-lots';
+        } else {
+            entry.areaEl.textContent = 'No lots found';
+            entry.areaEl.className   = 'station-area no-lots';
+            entry.dotEl.className    = 'station-dot no-lots';
+        }
+    } catch {
+        entry.areaEl.textContent = 'Error';
+        entry.areaEl.className   = 'station-area no-lots';
+        entry.dotEl.className    = 'station-dot error';
+    }
+
+    loadedCount++;
+    updateSummary();
+    setProgress(loadedCount, totalStations);
+}
+
+// ── Main init ──────────────────────────────────────────────────
+async function init() {
+    setToast('Locating city…');
+
+    // 1. Fly to city
+    const cityData = await fetch(`/api/city_location?city=${encodeURIComponent(CITY)}`).then(r => r.json()).catch(() => null);
+    if (cityData) {
+        if (cityData.bounds) {
+            map.fitBounds(cityData.bounds, { padding: [32, 32] });
+        } else {
+            map.setView([cityData.lat, cityData.lon], 12);
+        }
+    } else {
+        map.setView([0, 0], 2);
+    }
+
+    setToast('Finding metro stations…');
+
+    // 2. Load stations
+    const stations = await fetch(`/api/stations?city=${encodeURIComponent(CITY)}`).then(r => r.json()).catch(() => []);
+
+    if (!Array.isArray(stations) || stations.length === 0) {
+        document.getElementById('s-stations').textContent = '0';
+        setToast(null);
+        return;
+    }
+
+    renderStations(stations);
+    setToast(`Loading parking lots (0 / ${stations.length})…`);
+
+    // 3. Process sequentially
+    for (let i = 0; i < stationItems.length; i++) {
+        setToast(`Loading parking lots (${i + 1} / ${stationItems.length})…`);
+        await loadParkingForStation(stationItems[i]);
+    }
+
+    setToast(null);
+}
+
+// ── Helpers ────────────────────────────────────────────────────
+function formatArea(m2) {
+    return `${Math.round(m2).toLocaleString()} m²`;
+}
+
+init();
+</script>
+</body>
+</html>

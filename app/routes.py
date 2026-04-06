@@ -1,4 +1,4 @@
-from flask import Blueprint, render_template, request
+from flask import Blueprint, render_template, request, jsonify, redirect, url_for
 
 main = Blueprint('main', __name__)
 
@@ -23,7 +23,7 @@ def with_retry_session(func):
         retry = Retry(
             total=3,
             backoff_factor=1,
-            status_forcelist=[500, 502, 503, 504, 429],
+            status_forcelist=[500, 502, 503, 504],
             allowed_methods=["POST"],
             raise_on_status=False
         )
@@ -72,36 +72,39 @@ from pyproj import CRS, Transformer
 
 
 OVERPASS_URLS = [
-    "https://lz4.overpass-api.de/api/interpreter",        # fastest / best success rate
+    "https://overpass-api.de/api/interpreter",           # canonical — generous rate limits
+    "https://lz4.overpass-api.de/api/interpreter",
     "https://overpass.kumi.systems/api/interpreter",
-    "https://overpass.openstreetmap.fr/api/interpreter",
+    "https://maps.mail.ru/osm/tools/overpass/api/interpreter",
 ]
 
 
 def overpass_query(query, session: requests.Session):
-    """Try multiple Overpass servers sequentially until one succeeds."""
+    """Try multiple Overpass mirrors sequentially until one returns valid data."""
     for url in OVERPASS_URLS:
         try:
             resp = session.post(url, data={"data": query}, timeout=90)
-            if resp.status_code == 429:    # rate limited
-                time.sleep(3)
+            if resp.status_code == 429:
+                time.sleep(5)   # back off, then try next mirror immediately
                 continue
-            resp.raise_for_status()
-            return resp.json()
+            if resp.status_code != 200:
+                continue
+            data = resp.json()
+            if "elements" not in data:  # not a valid Overpass response
+                continue
+            return data
         except Exception:
             continue
     raise Exception("All Overpass servers failed or timed out")
 
 def get_parking_lots_polygons(lat, lon, radius=1000, surface=False, session=None):
     """
-    Fetch parking lots near (lat,lon), sequentially expand geometry, compute areas.
-    This version is designed to eliminate 429/504 errors.
+    Fetch parking lot polygons near (lat, lon) in a single Overpass query using
+    'out geom tags' to avoid the N+1 per-way round trips of the old two-phase approach.
     """
-
     if session is None:
         session = requests.Session()
 
-    # --- Phase A: Fast lightweight lookup (center only) ---
     if surface:
         selector = f'way["amenity"="parking"]["parking"="surface"](around:{radius},{lat},{lon});'
     else:
@@ -111,71 +114,54 @@ def get_parking_lots_polygons(lat, lon, radius=1000, surface=False, session=None
             f'(around:{radius},{lat},{lon});'
         )
 
-    lookup_query = f"""
+    query = f"""
     [out:json][timeout:90];
     (
       {selector}
     );
-    out ids center tags;
+    out geom tags;
     """
 
-    lookup = overpass_query(lookup_query, session)
-
+    data = overpass_query(query, session)
     results = []
 
-    # --- Phase B: Fetch geometry for each result (sequential, low load) ---
-    for el in lookup.get("elements", []):
-        way_id = el["id"]
+    for element in data.get("elements", []):
+        if "geometry" not in element:
+            continue
 
-        geom_query = f"""
-        [out:json][timeout:60];
-        way({way_id});
-        out geom tags;
-        """
+        raw_coords = [(pt["lon"], pt["lat"]) for pt in element["geometry"]]
+
+        # Deduplicate consecutive identical points and close the ring
+        coords = [raw_coords[0]]
+        for pt in raw_coords[1:]:
+            if pt != coords[-1]:
+                coords.append(pt)
+        if len(coords) > 2 and coords[0] == coords[-1]:
+            coords.pop()
+        if len(coords) < 3:
+            continue
+
+        poly = Polygon(coords)
+        if not poly.is_valid:
+            continue
 
         try:
-            geom_data = overpass_query(geom_query, session)
+            lon_c, lat_c = poly.centroid.x, poly.centroid.y
+            zone = int((lon_c + 180) / 6) + 1
+            epsg = (32600 + zone) if lat_c >= 0 else (32700 + zone)
+            proj = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True).transform
+            area = transform(proj, poly).area
         except Exception:
             continue
 
-        for element in geom_data.get("elements", []):
-            if "geometry" not in element:
-                continue
-
-            raw_coords = [(pt["lon"], pt["lat"]) for pt in element["geometry"]]
-
-            # --- cleanup coords ---
-            coords = [raw_coords[0]]
-            for pt in raw_coords[1:]:
-                if pt != coords[-1]:
-                    coords.append(pt)
-            if len(coords) > 2 and coords[0] == coords[-1]:
-                coords.pop()
-            if len(coords) < 3:
-                continue
-
-            poly = Polygon(coords)
-            if not poly.is_valid:
-                continue
-
-            # --- Compute area using UTM ---
-            try:
-                lon_c, lat_c = poly.centroid.x, poly.centroid.y
-                zone = int((lon_c + 180) / 6) + 1
-                epsg = (32600 + zone) if lat_c >= 0 else (32700 + zone)
-                proj = Transformer.from_crs("EPSG:4326", f"EPSG:{epsg}", always_xy=True).transform
-                area = transform(proj, poly).area
-            except:
-                continue
-
-            results.append({
-                "id": element["id"],
-                "type": element["type"],
-                "coordinates": coords,
-                "area_m2": round(area, 2),
-                "tags": element.get("tags", {}),
-                "polygon": poly
-            })
+        results.append({
+            "id": element["id"],
+            "type": element["type"],
+            "coordinates": coords,
+            "area_m2": round(area, 2),
+            "tags": element.get("tags", {}),
+            "polygon": poly
+        })
 
     return results
 
@@ -261,15 +247,117 @@ def get_metro_station_location(station_name, city=None):
     
     return results
 
+
+def get_metro_stations(city_name):
+    """Return all subway stations with lat/lon in one Overpass query."""
+    query = f"""
+    [out:json][timeout:30];
+    area["name:en"="{city_name}"]["boundary"="administrative"]->.searchArea;
+    node["railway"="station"]["station"="subway"](area.searchArea);
+    out body;
+    """
+    session = requests.Session()
+    data = overpass_query(query, session)
+
+    seen = set()
+    stations = []
+    for el in data.get("elements", []):
+        name = el.get("tags", {}).get("name")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        stations.append({"name": name, "lat": el["lat"], "lon": el["lon"]})
+    return sorted(stations, key=lambda x: x["name"])
+
+
+@main.route('/api/city_location')
+def api_city_location():
+    city = request.args.get('city', '').strip()
+    if not city:
+        return jsonify({'error': 'city required'}), 400
+    try:
+        resp = requests.get(
+            'https://nominatim.openstreetmap.org/search',
+            params={'q': city, 'format': 'json', 'limit': 1, 'addressdetails': 1},
+            headers={'User-Agent': 'surface-parking-lots-app/1.0'},
+            timeout=5
+        )
+        data = resp.json()
+    except Exception:
+        return jsonify({'error': 'lookup failed'}), 500
+
+    if not data:
+        return jsonify({'error': 'city not found'}), 404
+
+    item = data[0]
+    bb = item.get('boundingbox', [])
+    result = {'lat': float(item['lat']), 'lon': float(item['lon'])}
+    if len(bb) == 4:
+        # Nominatim boundingbox: [south, north, west, east]
+        result['bounds'] = [[float(bb[0]), float(bb[2])], [float(bb[1]), float(bb[3])]]
+    return jsonify(result)
+
+
+@main.route('/api/stations')
+def api_stations():
+    city = request.args.get('city', '').strip()
+    if not city:
+        return jsonify({'error': 'city required'}), 400
+    try:
+        return jsonify(get_metro_stations(city))
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
+
+@main.route('/api/parking_geojson')
+def api_parking_geojson():
+    lat = request.args.get('lat', type=float)
+    lon = request.args.get('lon', type=float)
+    radius = request.args.get('radius', 500, type=int)
+
+    if lat is None or lon is None:
+        return jsonify({'error': 'lat/lon required'}), 400
+
+    session = requests.Session()
+    retry = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504],
+                  allowed_methods=["POST"], raise_on_status=False)
+    adapter = HTTPAdapter(max_retries=retry)
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+
+    lots = get_parking_lots_polygons(lat, lon, radius, session=session)
+
+    features = [{
+        "type": "Feature",
+        "geometry": {
+            "type": "Polygon",
+            "coordinates": [[[c[0], c[1]] for c in lot['coordinates']]]
+        },
+        "properties": {"area_m2": lot["area_m2"]}
+    } for lot in lots]
+
+    return jsonify({
+        "type": "FeatureCollection",
+        "features": features,
+        "total_area_m2": round(sum(l["area_m2"] for l in lots), 2)
+    })
+
+
 @main.route('/', methods=['GET'])
 def home():
     return render_template('base.html')
 
+@main.route('/city')
+def city_view():
+    city = request.args.get('city', '')
+    radius = request.args.get('radius', 500, type=int)
+    return render_template('city.html', city=city, radius=radius)
+
 @main.route('/search', methods=['POST'])
 def search():
-    city = request.form.get('city')
-    metro_station_names = get_metro_station_names(city)
-    return render_template('search_results.html', city=city, stations=metro_station_names)
+    city = request.form.get('city', '')
+    radius = request.form.get('radius', 500)
+    return redirect(url_for('main.city_view', city=city, radius=radius))
 
 @main.route('/get_parking_lots', methods=['POST'])
 def get_parking_lots():
