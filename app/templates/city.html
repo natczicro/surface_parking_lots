@@ -466,6 +466,27 @@ function updateSummary() {
     document.getElementById('s-area').textContent   = totalArea > 0 ? formatArea(totalArea) : '—';
 }
 
+// ── Parking layer styles & highlight ──────────────────────────
+const STYLE_DEFAULT = { color: '#0d9488', fillColor: '#0d9488', fillOpacity: 0.22, weight: 1.5 };
+const STYLE_ACTIVE  = { color: '#f59e0b', fillColor: '#f59e0b', fillOpacity: 0.45, weight: 2 };
+
+const parkingLayers = []; // { layer, stations: [...] }
+let activeStation = null;
+
+function highlightStation(name) {
+    if (activeStation === name) {
+        activeStation = null;
+        parkingLayers.forEach(({ layer }) => layer.setStyle(STYLE_DEFAULT));
+        return false; // deselected
+    }
+    activeStation = name;
+    parkingLayers.forEach(({ layer, stations }) => {
+        layer.setStyle(stations.includes(name) ? STYLE_ACTIVE : STYLE_DEFAULT);
+        if (stations.includes(name)) layer.bringToFront();
+    });
+    return true; // selected
+}
+
 // ── Station list ───────────────────────────────────────────────
 // Each entry: { name, lat, lon, area_m2, dotEl, areaEl, itemEl }
 const stationItems = [];
@@ -529,21 +550,28 @@ function renderStations(stations) {
             </div>`;
 
         item.addEventListener('click', () => {
+            const selected = highlightStation(s.name);
             document.querySelectorAll('.station-item').forEach(el => el.classList.remove('active'));
-            item.classList.add('active');
+            if (selected) item.classList.add('active');
             map.flyTo([s.lat, s.lon], 15, { duration: 1.0 });
         });
 
         list.appendChild(item);
 
         // Small ring marker for the station
-        L.circleMarker([s.lat, s.lon], {
+        const marker = L.circleMarker([s.lat, s.lon], {
             radius: 5,
             color: '#0d9488',
             fillColor: '#ffffff',
             fillOpacity: 1,
             weight: 2.5
         }).addTo(map).bindTooltip(s.name, { direction: 'top', offset: [0, -4] });
+
+        marker.on('click', () => {
+            const selected = highlightStation(s.name);
+            document.querySelectorAll('.station-item').forEach(el => el.classList.remove('active'));
+            if (selected) item.classList.add('active');
+        });
 
         stationItems.push({
             ...s,
@@ -615,10 +643,11 @@ async function init() {
     // Add all polygons to the map at once
     if (parkingData.features && parkingData.features.length > 0) {
         L.geoJSON(parkingData, {
-            style: { color: '#0d9488', fillColor: '#0d9488', fillOpacity: 0.22, weight: 1.5 },
+            style: STYLE_DEFAULT,
             onEachFeature(feature, layer) {
                 const area = Math.round(feature.properties.area_m2).toLocaleString();
                 layer.bindPopup(`<strong>${area} m²</strong>`, { closeButton: false });
+                parkingLayers.push({ layer, stations: feature.properties.stations || [] });
             }
         }).addTo(map);
     }
