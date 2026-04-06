@@ -111,6 +111,47 @@
             margin-top: 3px;
         }
 
+        /* Sort bar */
+        #sort-bar {
+            display: flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 14px;
+            border-bottom: 1px solid #f3f4f6;
+            flex-shrink: 0;
+            min-width: 300px;
+        }
+
+        .sort-label {
+            font-size: 0.7rem;
+            font-weight: 500;
+            color: #9ca3af;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-right: 2px;
+        }
+
+        .sort-btn {
+            background: none;
+            border: 1px solid #e5e7eb;
+            border-radius: 6px;
+            padding: 3px 10px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            color: #6b7280;
+            cursor: pointer;
+            transition: background 0.12s, color 0.12s, border-color 0.12s;
+            font-family: 'Inter', sans-serif;
+        }
+
+        .sort-btn:hover { background: #f9fafb; color: #374151; }
+
+        .sort-btn.active {
+            background: #f0fdfa;
+            border-color: #0d9488;
+            color: #0d9488;
+        }
+
         /* Station list */
         #station-list {
             flex: 1;
@@ -249,6 +290,28 @@
             transition: opacity 0.3s;
         }
         #progress-bar-wrap.hidden { opacity: 0; }
+
+        /* Error banner */
+        #error-banner {
+            position: absolute;
+            top: 14px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 900;
+            background: #fef2f2;
+            border: 1px solid #fca5a5;
+            border-radius: 10px;
+            padding: 10px 16px;
+            font-size: 0.82rem;
+            color: #b91c1c;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            box-shadow: 0 4px 16px rgba(0,0,0,0.08);
+            max-width: 420px;
+            text-align: left;
+        }
+        #error-banner.hidden { display: none; }
         #progress-bar {
             height: 100%;
             background: linear-gradient(90deg, #0d9488, #10b981);
@@ -295,6 +358,12 @@
                 </div>
             </div>
 
+            <div id="sort-bar">
+                <span class="sort-label">Sort</span>
+                <button class="sort-btn active" id="sort-alpha">A – Z</button>
+                <button class="sort-btn" id="sort-area">Area ↓</button>
+            </div>
+
             <div id="station-list"></div>
         </div>
     </div>
@@ -309,6 +378,15 @@
 
         <div id="progress-bar-wrap">
             <div id="progress-bar"></div>
+        </div>
+
+        <div id="error-banner" class="hidden">
+            <svg width="15" height="15" viewBox="0 0 15 15" fill="none" flex-shrink="0">
+                <circle cx="7.5" cy="7.5" r="6.5" stroke="#b91c1c" stroke-width="1.4"/>
+                <path d="M7.5 4.5v3.5" stroke="#b91c1c" stroke-width="1.5" stroke-linecap="round"/>
+                <circle cx="7.5" cy="10.5" r="0.75" fill="#b91c1c"/>
+            </svg>
+            <span id="error-text"></span>
         </div>
 
         <div id="progress-toast">
@@ -355,6 +433,15 @@ const toastText  = document.getElementById('toast-text');
 const progressBar = document.getElementById('progress-bar');
 const progressWrap = document.getElementById('progress-bar-wrap');
 
+const errorBanner = document.getElementById('error-banner');
+const errorText   = document.getElementById('error-text');
+
+function showError(msg) {
+    setToast(null);
+    errorText.textContent = msg;
+    errorBanner.classList.remove('hidden');
+}
+
 function setToast(text) {
     if (text) {
         toastText.textContent = text;
@@ -380,8 +467,49 @@ function updateSummary() {
 }
 
 // ── Station list ───────────────────────────────────────────────
-// Each entry: { name, lat, lon, dotEl, areaEl, itemEl }
+// Each entry: { name, lat, lon, area_m2, dotEl, areaEl, itemEl }
 const stationItems = [];
+let currentSort = 'alpha';
+let sortDir = { alpha: 1, area: -1 }; // 1 = asc, -1 = desc
+
+const LABELS = {
+    alpha: { '1': 'A – Z', '-1': 'Z – A' },
+    area:  { '1': 'Area ↑', '-1': 'Area ↓' },
+};
+
+function applySortOrder() {
+    const list = document.getElementById('station-list');
+    const dir  = sortDir[currentSort];
+    const sorted = [...stationItems].sort((a, b) => {
+        if (currentSort === 'area') {
+            const av = a.area_m2 ?? -1, bv = b.area_m2 ?? -1;
+            return dir * (bv - av);
+        }
+        return dir * a.name.localeCompare(b.name);
+    });
+    sorted.forEach(entry => list.appendChild(entry.itemEl));
+}
+
+function updateSortButtons() {
+    document.getElementById('sort-alpha').textContent = LABELS.alpha[sortDir.alpha];
+    document.getElementById('sort-area').textContent  = LABELS.area[sortDir.area];
+    document.getElementById('sort-alpha').classList.toggle('active', currentSort === 'alpha');
+    document.getElementById('sort-area').classList.toggle('active',  currentSort === 'area');
+}
+
+document.getElementById('sort-alpha').addEventListener('click', () => {
+    if (currentSort === 'alpha') sortDir.alpha *= -1;
+    else currentSort = 'alpha';
+    updateSortButtons();
+    applySortOrder();
+});
+
+document.getElementById('sort-area').addEventListener('click', () => {
+    if (currentSort === 'area') sortDir.area *= -1;
+    else currentSort = 'area';
+    updateSortButtons();
+    applySortOrder();
+});
 
 function renderStations(stations) {
     totalStations = stations.length;
@@ -419,55 +547,12 @@ function renderStations(stations) {
 
         stationItems.push({
             ...s,
+            area_m2: null,
             dotEl:  document.getElementById(`dot-${i}`),
             areaEl: document.getElementById(`area-${i}`),
             itemEl: item
         });
     });
-}
-
-// ── Load parking lots (sequential queue) ──────────────────────
-async function loadParkingForStation(entry) {
-    entry.dotEl.className  = 'station-dot loading';
-    entry.areaEl.textContent = 'Loading…';
-    entry.areaEl.className   = 'station-area';
-
-    try {
-        const url = `/api/parking_geojson?lat=${entry.lat}&lon=${entry.lon}&radius=${RADIUS}`;
-        const data = await fetch(url).then(r => r.json());
-
-        if (data.features && data.features.length > 0) {
-            L.geoJSON(data, {
-                style: {
-                    color: '#0d9488',
-                    fillColor: '#0d9488',
-                    fillOpacity: 0.22,
-                    weight: 1.5
-                },
-                onEachFeature(feature, layer) {
-                    const area = Math.round(feature.properties.area_m2).toLocaleString();
-                    layer.bindPopup(`<strong>${area} m²</strong>`, { closeButton: false });
-                }
-            }).addTo(map);
-
-            totalArea += data.total_area_m2;
-            entry.areaEl.textContent = formatArea(data.total_area_m2);
-            entry.areaEl.className   = 'station-area has-lots';
-            entry.dotEl.className    = 'station-dot has-lots';
-        } else {
-            entry.areaEl.textContent = 'No lots found';
-            entry.areaEl.className   = 'station-area no-lots';
-            entry.dotEl.className    = 'station-dot no-lots';
-        }
-    } catch {
-        entry.areaEl.textContent = 'Error';
-        entry.areaEl.className   = 'station-area no-lots';
-        entry.dotEl.className    = 'station-dot error';
-    }
-
-    loadedCount++;
-    updateSummary();
-    setProgress(loadedCount, totalStations);
 }
 
 // ── Main init ──────────────────────────────────────────────────
@@ -476,7 +561,7 @@ async function init() {
 
     // 1. Fly to city
     const cityData = await fetch(`/api/city_location?city=${encodeURIComponent(CITY)}`).then(r => r.json()).catch(() => null);
-    if (cityData) {
+    if (cityData && !cityData.error) {
         if (cityData.bounds) {
             map.fitBounds(cityData.bounds, { padding: [32, 32] });
         } else {
@@ -484,29 +569,82 @@ async function init() {
         }
     } else {
         map.setView([0, 0], 2);
+        showError(`Could not locate "${CITY}" — check the city name and try again.`);
+        return;
     }
+
+    const areaId = cityData.area_id ?? null;
 
     setToast('Finding metro stations…');
 
-    // 2. Load stations
-    const stations = await fetch(`/api/stations?city=${encodeURIComponent(CITY)}`).then(r => r.json()).catch(() => []);
+    // 2. Load stations first so sidebar populates immediately
+    const stationsUrl = `/api/stations?city=${encodeURIComponent(CITY)}` + (areaId ? `&area_id=${areaId}` : '');
+    const stations = await fetch(stationsUrl).then(r => r.json()).catch(() => null);
 
+    if (!stations || stations.error) {
+        showError('Could not reach OpenStreetMap servers. They may be temporarily down — please try again shortly.');
+        return;
+    }
     if (!Array.isArray(stations) || stations.length === 0) {
         document.getElementById('s-stations').textContent = '0';
-        setToast(null);
+        showError(`No metro stations found in "${CITY}". Try a different city name.`);
         return;
     }
 
     renderStations(stations);
-    setToast(`Loading parking lots (0 / ${stations.length})…`);
+    setToast('Loading all parking lots…');
+    setProgress(0, 1);
 
-    // 3. Process sequentially
-    for (let i = 0; i < stationItems.length; i++) {
-        setToast(`Loading parking lots (${i + 1} / ${stationItems.length})…`);
-        await loadParkingForStation(stationItems[i]);
+    // 3. Single city-wide query — station coords passed in so backend skips re-fetching them
+    const parkingData = await fetch('/api/all_parking', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ city: CITY, radius: RADIUS, stations, area_id: areaId })
+    }).then(r => r.json()).catch(() => null);
+
+    if (!parkingData || parkingData.error) {
+        stationItems.forEach(entry => {
+            entry.areaEl.textContent = 'Error';
+            entry.areaEl.className   = 'station-area no-lots';
+            entry.dotEl.className    = 'station-dot error';
+        });
+        showError('Could not load parking lot data. OpenStreetMap servers may be temporarily down — please try again shortly.');
+        return;
     }
 
+    // Add all polygons to the map at once
+    if (parkingData.features && parkingData.features.length > 0) {
+        L.geoJSON(parkingData, {
+            style: { color: '#0d9488', fillColor: '#0d9488', fillOpacity: 0.22, weight: 1.5 },
+            onEachFeature(feature, layer) {
+                const area = Math.round(feature.properties.area_m2).toLocaleString();
+                layer.bindPopup(`<strong>${area} m²</strong>`, { closeButton: false });
+            }
+        }).addTo(map);
+    }
+
+    // Populate sidebar areas
+    const stationAreas = parkingData.stations || {};
+    stationItems.forEach(entry => {
+        const area = stationAreas[entry.name] ?? 0;
+        entry.area_m2 = area;
+        loadedCount++;
+        if (area > 0) {
+            entry.areaEl.textContent = formatArea(area);
+            entry.areaEl.className   = 'station-area has-lots';
+            entry.dotEl.className    = 'station-dot has-lots';
+            totalArea += area;
+        } else {
+            entry.areaEl.textContent = 'No lots found';
+            entry.areaEl.className   = 'station-area no-lots';
+            entry.dotEl.className    = 'station-dot no-lots';
+        }
+    });
+
+    updateSummary();
+    setProgress(1, 1);
     setToast(null);
+    if (currentSort === 'area') applySortOrder();
 }
 
 // ── Helpers ────────────────────────────────────────────────────
